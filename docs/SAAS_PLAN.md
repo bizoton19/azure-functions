@@ -209,10 +209,60 @@ kill the top of funnel for no material savings.
 
 ## 4. Frontend plan: `status-web` SPA (PM + Architect)
 
-Separate repo. React + Vite + TypeScript, Clerk React SDK, hosted on Azure
-Static Web Apps (free tier covers MVP, custom domain included).
+React + Vite + TypeScript, Clerk React SDK. **Hosting stays where it is today:
+the SPA on Netlify, the Functions app on Azure** — both free tiers cover MVP,
+and there is no benefit to migrating either side.
 
-Screens (MVP):
+### 4.1 Repo strategy: monorepo (decision)
+
+The SPA moves **into this repo** under `apps/status-web/` rather than living in
+a separate repo:
+
+```
+src/                      backend (.NET) — deployed to Azure Functions
+apps/status-web/          SPA (React/Vite) — deployed to Netlify
+docs/, tests/, legacy/
+```
+
+Why monorepo:
+
+- **One PR per feature.** Every meaningful change here touches the API and the
+  UI that consumes it (import errors, usage meter, billing). Two repos means
+  two PRs, cross-repo coordination, and "deploy backend first" choreography
+  that a single reviewable change eliminates.
+- **The API contract lives next to its consumer.** The SPA's API client types
+  are reviewed in the same diff as the C# response shapes; drift is caught at
+  review time. (If/when we want generated types, we emit an OpenAPI spec from
+  the Functions app and generate the TS client inside the same build.)
+- **One team, one product.** Polyrepo earns its overhead when separate teams
+  own separate release cadences. We are nowhere near that.
+- **Both deploy targets are path-aware**, so the monorepo costs nothing in
+  CI/CD (see 4.2).
+
+### 4.2 Deployment topology & CI/CD
+
+| Component | Host | Trigger |
+| --- | --- | --- |
+| Functions app | Azure (consumption) | GitHub Actions with `paths: [src/**, tests/**]` filter → build, test, `azure/functions-action` deploy |
+| `status-web` SPA | Netlify | Netlify Git integration with **base directory** `apps/status-web` and an ignore command (`git diff --quiet HEAD^ HEAD -- apps/status-web/`) so backend-only commits don't trigger UI builds |
+
+Netlify specifics:
+
+- **Deploy previews per PR** are the main reason to keep Netlify: every PR gets
+  a URL the PM can click. Point previews at a staging Functions app via
+  `VITE_API_BASE_URL` (deploy-context env var), never at production.
+- **Proxy the API through Netlify redirects** to make the SPA and API
+  same-origin: `/_redirects` rule `/api/* https://<funcapp>.azurewebsites.net/api/:splat 200`.
+  This removes CORS preflights (lower latency on every dashboard poll), hides
+  the raw Azure hostname, and means the SPA needs no API URL at runtime in
+  production. Keep Functions-side CORS locked to the Netlify domains as
+  defense-in-depth for direct calls.
+- Env vars: `VITE_CLERK_PUBLISHABLE_KEY` (per deploy context),
+  `VITE_API_BASE_URL` (previews/branch deploys only).
+- Custom domain + HTTPS on Netlify; the Functions hostname is an internal
+  detail behind the proxy.
+
+### Screens (MVP):
 
 1. **Sign-in / sign-up** — Clerk components, Google/GitHub/email.
 2. **Dashboard** — `GET /api/status` table: name, URL, status pill, last
@@ -236,7 +286,8 @@ the SPA sends `Authorization: Bearer <Clerk session token>` on every call.
 
 ## 5. Cost model (Architect)
 
-Consumption-plan Functions + Storage + Static Web Apps. Per-tenant marginal
+Consumption-plan Functions + Storage on Azure; SPA on Netlify (free tier, then
+$19/mo Pro when we want more build minutes/team seats). Per-tenant marginal
 cost at full plan utilization:
 
 | Tier | Checks/mo | Storage txns/mo (~5×) | Est. marginal cost/mo | Price | Gross margin |
@@ -280,8 +331,10 @@ remaining step.*
 **Phase 2 — Monetization:** Stripe Checkout/Portal/webhooks (§3.4), suspension
 flow, usage meter in `/api/me` (done) surfaced in SPA settings, annual pricing.
 
-**Phase 3 — status-web SPA:** screens in §4, Clerk integration, Static Web
-Apps deployment, custom domain, CORS lock-down.
+**Phase 3 — status-web SPA:** move/scaffold the SPA into `apps/status-web/`
+(monorepo, §4.1), screens in §4, Clerk integration, Netlify base-directory +
+ignore-command config, `/api/*` proxy redirect to the Azure Functions app,
+deploy previews against staging, custom domain, CORS lock-down.
 
 **Phase 4 — Retention & hardening:** history TTL sweeper per plan (timer
 function deleting aged `UrlStatusHistory` partitions), SSRF egress filter,

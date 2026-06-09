@@ -19,6 +19,9 @@ src/
   StatusMonitor.Functions/   .NET 8 isolated-worker Azure Functions app:
                              scheduler, poller, persisters, alerter, HTTP API,
                              OIDC tenant-auth middleware.
+apps/
+  status-web/                (planned, Phase 3) React SPA, deployed to Netlify;
+                             the Functions app stays on Azure. See the plan §4.
 tests/
   StatusMonitor.Core.Tests/  xUnit tests for the core logic.
 docs/
