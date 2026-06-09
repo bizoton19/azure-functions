@@ -1,0 +1,16 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+
+    "Auth__Mode": "Development",
+    "Auth__Authority": "https://your-app.clerk.accounts.dev",
+    "Auth__Audience": "",
+    "Auth__TenantClaim": "org_id",
+
+    "SENDGRID_API_KEY": "",
+    "ALERT_FROM_EMAIL": "alerts@yourdomain.example",
+    "EMAIL_RECIPIENTS": "you@yourdomain.example"
+  }
+}
