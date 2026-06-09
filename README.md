@@ -1,20 +1,99 @@
-# Site Status Notification
+# Status Monitor
 
-The prupose of this is to provide a simple but contextual level of monitoring to any website or sections of public websites.
-It uses http polling to ping the website and attempts to read the website or http service's content after getting a successfull http return code.
-If an unsuccessful return code is read for 1 or more site, the application aggregates the number of failures and sends out an email alert.
+Contextual uptime monitoring, rebuilt as a multi-tenant SaaS backend on Azure
+Functions (.NET 8, isolated worker). Companies sign up (Clerk/WorkOS), upload
+URLs from a spreadsheet or paste them into the `status-web` SPA, and get email
+alerts when sites stop responding — including pages that return 200 but
+actually serve an error or maintenance page.
 
-## Infrastructure
-The application and set of functions are built on [Microsoft Azure](https://docs.microsoft.com/en-us/azure/azure-functions/).
-The alerter module of the application is provided by [SendGrid](https://sendgrid.com/), and email delivery service that integrates well with azure, as a matter of fact, it has it's own function bindings in azure functions whih allow for easy integration.
+The original single-tenant C# script (`.csx`) functions are preserved in
+[`legacy/`](legacy/README.md), with a mapping to their replacements.
 
-| Data Store    | Messaging     | Programming | Email Delivery Service |
-| ------------- | ------------- |------------| -----------------------
-| [Azure Storage Tables](https://azure.microsoft.com/en-us/services/storage/tables/)  | [Azure Queue Storage](https://azure.microsoft.com/en-us/services/storage/queues/)  | .NET | [SendGrid](https://sendgrid.com/) |
+## Repository layout
 
+```
+src/
+  StatusMonitor.Core/        Domain logic: plans & limits, tenancy, table/queue
+                             storage, CSV/paste parsing, URL polling. No Azure
+                             Functions dependency; fully unit tested.
+  StatusMonitor.Functions/   .NET 8 isolated-worker Azure Functions app:
+                             scheduler, poller, persisters, alerter, HTTP API,
+                             OIDC tenant-auth middleware.
+apps/
+  status-web/                (planned, Phase 3) React SPA, deployed to Netlify;
+                             the Functions app stays on Azure. See the plan §4.
+tests/
+  StatusMonitor.Core.Tests/  xUnit tests for the core logic.
+docs/
+  SAAS_PLAN.md               Product & architecture plan for the SaaS offering.
+legacy/                      Original .csx functions (frozen, not deployed).
+```
 
-## Logical Architecture
-![architecture](/azure_functions_architecture.jpg "architecture")
+## Architecture
 
+```
+PollScheduler (timer, 1 min)
+  └─ enqueues a job per tenant whose plan interval elapsed
+       └─ poll-jobs-queue ─► UrlPoller ─┬─► status-states-queue  ─► StatusStatePersister  ─► UrlStatuses
+                                        ├─► status-history-queue ─► StatusHistoryPersister ─► UrlStatusHistory
+                                        └─► status-notifications-queue ─► EmailAlerter ─► SendGrid
 
+status-web SPA ──(Bearer JWT: Clerk/WorkOS)──► HTTP API
+  GET    /api/me                       tenant, plan, usage (auto-provisions on first call)
+  GET    /api/urls                     list monitored URLs
+  POST   /api/urls                     bulk import (JSON array, CSV upload, or pasted list)
+  DELETE /api/urls/{urlKey}            remove a URL
+  GET    /api/status                   current status of every URL
+  GET    /api/status/{urlKey}/history  recent checks, newest first
+```
 
+Every table is partitioned by tenant id, and the tenant id is resolved
+exclusively from the validated JWT — see
+[docs/SAAS_PLAN.md](docs/SAAS_PLAN.md) for the full design, pricing tiers,
+payments (Stripe) plan, and cost model.
+
+## Local development
+
+Prerequisites: [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0),
+[Azure Functions Core Tools v4](https://learn.microsoft.com/azure/azure-functions/functions-run-local),
+and [Azurite](https://learn.microsoft.com/azure/storage/common/storage-use-azurite)
+for local storage emulation.
+
+```bash
+dotnet build StatusMonitor.sln
+dotnet test  StatusMonitor.sln
+
+cd src/StatusMonitor.Functions
+cp local.settings.example.json local.settings.json   # then edit as needed
+func start
+```
+
+With `Auth__Mode` set to `Development` (the default in the example settings),
+requests authenticate with headers instead of a JWT:
+
+```bash
+curl -H "x-tenant-id: demo-tenant" http://localhost:7071/api/me
+
+curl -X POST -H "x-tenant-id: demo-tenant" -H "Content-Type: text/csv" \
+     --data-binary $'name,url\nExample,https://example.com' \
+     http://localhost:7071/api/urls
+
+curl -H "x-tenant-id: demo-tenant" http://localhost:7071/api/status
+```
+
+For production, set `Auth__Mode=Jwt` and point `Auth__Authority` at your Clerk
+instance (or WorkOS AuthKit issuer); the middleware validates tokens against
+the issuer's JWKS and resolves the tenant from the `org_id` claim.
+
+## Configuration
+
+| Setting | Purpose |
+| --- | --- |
+| `AzureWebJobsStorage` | Storage account for tables and queues. |
+| `Auth__Mode` | `Jwt` (production) or `Development` (header-based). |
+| `Auth__Authority` | OIDC issuer, e.g. `https://your-app.clerk.accounts.dev`. |
+| `Auth__Audience` | Optional expected `aud` claim; empty skips the check. |
+| `Auth__TenantClaim` | Claim carrying the organization id (default `org_id`). |
+| `SENDGRID_API_KEY` | SendGrid API key for alert emails. |
+| `ALERT_FROM_EMAIL` | From address for alerts. |
+| `EMAIL_RECIPIENTS` | Fallback recipients when a tenant has none configured. |
